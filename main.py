@@ -1,8 +1,9 @@
-from fastapi import FastAPI, Depends, HTTPException, Request
+from typing import Union
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import RedirectResponse
-from sqlalchemy.orm import Session
+from database import DB_SESSION
 from sqlalchemy import select
-from database import create_db_tables, get_db
+from database import create_db_tables
 from encoding import to_base62
 import models
 import schemas
@@ -15,32 +16,56 @@ def root():
     return 'URL Shortener API'
 
 
-@app.get('/mappings')
-def get_mappings(db: Session = Depends(get_db)):
-    return db.query(models.UrlMapping).all()
+@app.get('/mappings', response_model=list[schemas.MappingsPrint])
+def get_mappings(http_request: Request, db: DB_SESSION):
+    base_url = str(http_request.base_url).rstrip('/')
+    
+    mappings = db.scalars(select(models.UrlMapping)).all()
+    response_data = []
+
+    for mapping in mappings:
+        response_data.append({
+            "id": mapping.id,
+            "url": mapping.url,
+            "short_code": mapping.short_code,
+            "short_url": f"{base_url}/{mapping.short_code}",
+            "clicks": mapping.clicks
+        })
+    return response_data
 
 
-@app.post('/shorten')
-def shortener(http_request: Request, request: schemas.Url, db: Session = Depends(get_db)):
-    UrlMapping = models.UrlMapping
-    base_url = str(http_request.base_url)
+@app.post('/shorten', response_model=Union[schemas.MappingsPrint, schemas.MappingsPrintDetail])
+def shortener(http_request: Request, request: schemas.Url, db: DB_SESSION):
+    base_url = str(http_request.base_url).rstrip('/')
 
     existing = db.execute(
-        select(UrlMapping).where(UrlMapping.url == request.url)
+        select(models.UrlMapping).where(models.UrlMapping.url == str(request.url).rstrip('/'))
     ).scalar_one_or_none()
 
     if existing:
-        return {'short_url': base_url + existing.short_code}
+        return {
+            "id": existing.id,
+            "url": existing.url,
+            "short_code": existing.short_code,
+            "short_url": f"{base_url}/{existing.short_code}",
+            "clicks": existing.clicks,
+            "detail": 'The mapping already exists.'
+        }
 
     try:
-        new_url = UrlMapping(url=request.url, short_code=None)
-        db.add(new_url)
+        new_url_mapping = models.UrlMapping(url=str(request.url).rstrip('/'), short_code=None)
+        db.add(new_url_mapping)
         db.flush()
-        new_url.short_code = to_base62(new_url.id)
+        new_url_mapping.short_code = to_base62(new_url_mapping.id)
         db.commit()
 
-
-        return {'short_url': base_url + new_url.short_code}
+        return {
+            "id": new_url_mapping.id,
+            "url": new_url_mapping.url,
+            "short_code": new_url_mapping.short_code,
+           "short_url": f"{base_url}/{new_url_mapping.short_code}",
+            "clicks": new_url_mapping.clicks,
+        }
 
     except Exception as e:
         db.rollback()
@@ -48,11 +73,10 @@ def shortener(http_request: Request, request: schemas.Url, db: Session = Depends
 
 
 @app.get('/{short_code}')
-def redirect(short_code, db: Session = Depends(get_db)):
-    UrlMapping = models.UrlMapping
+def redirect(short_code: str, db: DB_SESSION):
 
     record = db.execute(
-        select(UrlMapping).where(UrlMapping.short_code == short_code)
+        select(models.UrlMapping).where(models.UrlMapping.short_code == short_code)
     ).scalar_one_or_none()
 
     if record:
