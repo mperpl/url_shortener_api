@@ -13,7 +13,7 @@ create_db_tables()
 
 @app.get('/')
 def root():
-    return 'URL Shortener API'
+    return {'message': 'URL Shortener API'}
 
 
 @app.get('/mappings', response_model=list[schemas.MappingsPrint])
