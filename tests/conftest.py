@@ -1,57 +1,53 @@
-from fastapi import Request
-from fastapi.testclient import TestClient
 import pytest
-from sqlalchemy import StaticPool, create_engine
-from sqlalchemy.orm import sessionmaker
-from database import Base, get_db
+from asgi_lifespan import LifespanManager
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy import StaticPool, text
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+from database import get_async_db, Base
 from main import app
 from models import UrlMapping
 
-SQLALCHEMY_DATABASE_URL = 'sqlite:///:memory:'
-engine = create_engine(SQLALCHEMY_DATABASE_URL, connect_args={'check_same_thread': False}, poolclass=StaticPool)
-TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-def create_db_testing_session():
-    db = TestingSessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-def override_get_db():
-   yield from create_db_testing_session()
-app.dependency_overrides[get_db] = override_get_db
+TEST_DATABASE_URL = "sqlite+aiosqlite:///:memory:"
+async_test_engine = create_async_engine(TEST_DATABASE_URL, connect_args={'check_same_thread': False}, poolclass=StaticPool)
+TestSessionLocal = async_sessionmaker(bind=async_test_engine, class_=AsyncSession, expire_on_commit=False)
 
 
-@pytest.fixture
-def session(clean_db):
-    yield from create_db_testing_session()
+async def override_get_async_db():
+    async with TestSessionLocal() as session:
+        yield session
+app.dependency_overrides[get_async_db] = override_get_async_db
 
 
-@pytest.fixture
-def client():
-    test_client = TestClient(app)
-    yield test_client
-
-
-@pytest.fixture()
-def clean_db():
-    Base.metadata.create_all(bind=engine)
+@pytest.fixture(scope="session", autouse=True)
+async def create_db():
+    async with async_test_engine.begin() as con:
+        await con.run_sync(Base.metadata.create_all)
     yield
-    Base.metadata.drop_all(bind=engine)
+    await async_test_engine.dispose()
+
+
+@pytest.fixture(autouse=True)
+async def reset_db():
+    async with async_test_engine.begin() as con:
+        await con.execute(text("DELETE FROM url_mapping"))
+    yield
 
 
 @pytest.fixture
-def dummy_data(session):
-    dummy_mapping1 = UrlMapping(url='https://www.youtube.com', short_code=1, clicks=99)
-    dummy_mapping2 = UrlMapping(url='https://www.google.com', short_code=2, clicks=99)
+async def session():
+    async with TestSessionLocal() as session:
+        yield session
 
-    session.add(dummy_mapping1)
-    session.add(dummy_mapping2)
 
-    session.commit()
+@pytest.fixture
+async def client():
+    async with LifespanManager(app) as manager:
+        async with AsyncClient(transport=ASGITransport(app=manager.app), base_url='http://test') as ac:
+            yield ac
 
-    session.refresh(dummy_mapping1)
-    session.refresh(dummy_mapping2)
-
-    
+@pytest.fixture
+async def dummy_data(session):
+    m1 = UrlMapping(url='https://youtube.com', short_code='1', clicks=99)
+    m2 = UrlMapping(url='https://google.com', short_code='2', clicks=99)
+    session.add_all([m1, m2])
+    await session.commit()
